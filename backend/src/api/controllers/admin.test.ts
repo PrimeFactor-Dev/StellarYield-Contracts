@@ -54,7 +54,7 @@ function _hashKey(plaintext: string): string {
 
 describe("Admin Controller", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   it("returns per-vault fee metrics ordered by total fees and applies date filters", async () => {
@@ -541,4 +541,43 @@ describe("Admin Controller", () => {
       expect(res.json).toHaveBeenCalledWith({ data: [] });
     });
   });
+
+  describe("getSlowQueries (#963)", () => {
+    it("returns the latest 50 slow queries ordered by occurred_at DESC", async () => {
+      const { query } = await import("../../db/index.js");
+      const { getSlowQueries } = await import("./admin.js");
+      const mockQuery = query as ReturnType<typeof vi.fn>;
+
+      const mockData = [
+        {
+          id: 1,
+          query_hash: "hash123",
+          query_preview: "SELECT * FROM vaults WHERE id = $1",
+          duration_ms: "650.5",
+          route: "/api/v1/vaults",
+          occurred_at: new Date("2025-01-01T00:00:00Z"),
+        },
+      ];
+      mockQuery.mockResolvedValueOnce(mockData);
+
+      const req = {} as any;
+      const res = { json: vi.fn() } as any;
+      const next = vi.fn();
+
+      await getSlowQueries(req, res, next);
+
+      expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining("FROM slow_query_log"));
+      expect(res.json).toHaveBeenCalledWith([
+        {
+          id: 1,
+          query_hash: "hash123",
+          query_preview: "SELECT * FROM vaults WHERE id = $1",
+          duration_ms: 650.5,
+          route: "/api/v1/vaults",
+          occurred_at: mockData[0].occurred_at,
+        },
+      ]);
+    });
+  });
 });
+

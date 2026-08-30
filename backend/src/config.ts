@@ -106,6 +106,16 @@ const envSchema = z.object({
     .default("500")
     .transform((v) => parseInt(v, 10))
     .pipe(z.number().int().min(1)),
+  SLOW_QUERY_THRESHOLD_MS: z
+    .string()
+    .optional()
+    .transform((v) => (v ? parseInt(v, 10) : undefined))
+    .pipe(z.number().int().min(1).optional()),
+  MAX_RESPONSE_SIZE_MB: z
+    .string()
+    .default("50")
+    .transform((v) => parseInt(v, 10))
+    .pipe(z.number().int().min(1)),
   EVENTS_RETENTION_DAYS: z
     .string()
     .default("90")
@@ -206,8 +216,9 @@ export const config = {
     poolMax: parsed.data.DB_POOL_MAX,
     idleTimeoutMs: parsed.data.DB_IDLE_TIMEOUT_MS,
     queryTimeoutMs: parsed.data.DB_QUERY_TIMEOUT_MS,
-    slowQueryMs: parsed.data.DB_SLOW_QUERY_MS,
+    slowQueryMs: parsed.data.SLOW_QUERY_THRESHOLD_MS ?? parsed.data.DB_SLOW_QUERY_MS,
   },
+  maxResponseSizeMb: parsed.data.MAX_RESPONSE_SIZE_MB,
 
   indexer: {
     startLedger: parsed.data.INDEXER_START_LEDGER,
@@ -259,3 +270,11 @@ export const config = {
     from: parsed.data.SMTP_FROM,
   },
 } as const;
+
+export const ROUTE_CACHE_CONTROL: Record<string, number> = {
+  "/api/v1/vaults": 60,
+  "/api/v1/yields": 60,
+  "/api/v1/analytics": 300,
+  "/health": 0,
+};
+

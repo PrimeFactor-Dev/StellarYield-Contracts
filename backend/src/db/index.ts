@@ -1,8 +1,10 @@
 import pg from "pg";
 import { performance } from "node:perf_hooks";
+import crypto from "node:crypto";
 import { trace, SpanStatusCode, context } from "@opentelemetry/api";
 import { config } from "../config.js";
 import { logger } from "../logger.js";
+import { getCurrentRoute } from "../api/middleware/requestContext.js";
 import { AppError, ErrorCode } from "../api/middleware/errors.js";
 
 const tracer = trace.getTracer("stellaryield-db");
@@ -17,6 +19,28 @@ export const pool = new Pool({
   query_timeout: config.db.queryTimeoutMs,
 });
 
+export function redactQueryParameters(sql: string): string {
+  return sql
+    .replace(/'[^']*'/g, "'[REDACTED]'")
+    .replace(/"[^"]*"/g, '"[REDACTED]"')
+    .trim();
+}
+
+async function logSlowQuery(sql: string, durationMs: number): Promise<void> {
+  try {
+    const queryHash = crypto.createHash("sha256").update(sql).digest("hex");
+    const queryPreview = redactQueryParameters(sql).slice(0, 200);
+    const route = getCurrentRoute();
+    await pool.query(
+      `INSERT INTO slow_query_log (query_hash, query_preview, duration_ms, route)
+       VALUES ($1, $2, $3, $4)`,
+      [queryHash, queryPreview, durationMs, route],
+    );
+  } catch (err) {
+    logger.error({ err }, "Failed to log slow query");
+  }
+}
+
 // Prepared statement registry for hot queries
 const preparedStatements = new Map<string, { name: string; text: string }>();
 
@@ -30,30 +54,30 @@ export async function query<T = Record<string, unknown>>(
   params?: unknown[],
   options?: { timeoutMs?: number },
 ): Promise<T[]> {
-  const timeoutMs = options?.timeoutMs;
-  if (timeoutMs) {
-    const client = await pool.connect();
-    try {
-      await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
-      const result = await client.query(sql, params);
-      return result.rows;
-    } catch (err: any) {
-      if (err?.code === "57014") {
-        throw new AppError(ErrorCode.QUERY_TIMEOUT, "Query timed out", 504);
-      }
-      throw err;
-    } finally {
-      client.release();
-    }
-  }
-  const result = await pool.query(sql, params);
-  return result.rows;
   const span = tracer.startSpan("db.query", {}, context.active());
   span.setAttribute("db.statement", sql.slice(0, 80));
 
   const start = performance.now();
   try {
-    const result = await pool.query(sql, params);
+    let result: pg.QueryResult;
+    const timeoutMs = options?.timeoutMs;
+    if (timeoutMs) {
+      const client = await pool.connect();
+      try {
+        await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
+        result = await client.query(sql, params);
+      } catch (err: any) {
+        if (err?.code === "57014") {
+          throw new AppError(ErrorCode.QUERY_TIMEOUT, "Query timed out", 504);
+        }
+        throw err;
+      } finally {
+        client.release();
+      }
+    } else {
+      result = await pool.query(sql, params);
+    }
+
     const durationMs = performance.now() - start;
     const roundedMs = Math.round(durationMs * 100) / 100;
 
@@ -64,13 +88,17 @@ export async function query<T = Record<string, unknown>>(
         { sql, paramsCount: params?.length ?? 0, durationMs: roundedMs, rowCount: result.rowCount },
         "slow query",
       );
+      if (!sql.includes("slow_query_log")) {
+        logSlowQuery(sql, roundedMs).catch(() => {});
+      }
     } else if (logger.level === "debug" || logger.level === "trace") {
       const firstLine = config.nodeEnv === "production" ? sql.slice(0, 80) : sql;
       logger.debug({ sql: firstLine, durationMs: roundedMs, rowCount: result.rowCount }, "query");
     }
 
-    return result.rows;
+    return result.rows as T[];
   } catch (err) {
+    if (err instanceof AppError) throw err;
     span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
     throw err;
   } finally {

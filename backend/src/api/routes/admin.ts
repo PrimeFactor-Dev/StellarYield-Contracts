@@ -13,6 +13,7 @@ import {
   getArchivedVaults,
   getTotalSupplyConsistency,
   getDbStats,
+  getSlowQueries,
   getAdminFees,
   getAdminFeesDashboard,
   deleteUser,
@@ -29,7 +30,9 @@ import {
   getUserComplianceSummary,
   getRetentionPolicy,
   patchRetentionPolicy,
-  getApiDiff,
+  postBenchmark,
+  getBenchmarksByName,
+  vacuumDatabase,
 } from "../controllers/admin.js";
 import { requireApiKey } from "../middleware/auth.js";
 import { ipAllowlist } from "../middleware/ipAllowlist.js";
@@ -55,6 +58,7 @@ adminRouter.get("/webhooks/:id/deliveries", getWebhookDeliveries);
 // Issue #1006: bulk webhook enable/disable
 adminRouter.post("/webhooks/bulk/toggle", requireApiKey({ role: "admin" }), bulkToggleWebhooks);
 adminRouter.get("/db/stats", getDbStats);
+adminRouter.get("/db/slow-queries", getSlowQueries);
 adminRouter.get("/fees", getAdminFees);
 adminRouter.get("/fees/dashboard", requireApiKey({ role: "admin" }), getAdminFeesDashboard);
 adminRouter.delete("/users/:address", requireApiKey({ role: "admin" }), deleteUser);
@@ -77,4 +81,9 @@ adminRouter.patch("/retention-policy", patchRetentionPolicy);
 adminRouter.get("/jobs/dashboard", getJobQueueDashboard);
 adminRouter.get("/jobs/failed", getFailedJobs);
 adminRouter.get("/jobs/:jobId", getJobStatus);
+
+adminRouter.post("/benchmarks", requireApiKey({ role: "admin" }), postBenchmark);
+adminRouter.get("/benchmarks/:name", getBenchmarksByName);
+
+adminRouter.post("/db/vacuum", requireApiKey({ role: "admin" }), vacuumDatabase);
 

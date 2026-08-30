@@ -43,15 +43,15 @@ export function requireApiKey(options?: { role?: string; minRole?: "readonly" | 
 
     let rows: ApiKey[] = [];
     try {
-      rows = await query<ApiKey>(
+      rows = (await query<ApiKey>(
         'SELECT id, role, label, expires_at AS "expiresAt" FROM api_keys WHERE key_hash = $1',
         [keyHash],
-      );
+      )) ?? [];
     } catch {
       rows = [];
     }
 
-    if (rows.length === 0) {
+    if (!rows || rows.length === 0) {
       logger.info({
         event: "auth_attempt",
         success: false,

@@ -80,8 +80,6 @@ export class YieldService {
        ) ie ON TRUE
        WHERE v.contract_id = $1${yieldFilterSql}
        ORDER BY e.epoch ASC`,
-      [contractId],
-      timeoutMs ? { timeoutMs } : undefined,
       params,
     );
 
@@ -387,7 +385,6 @@ export class YieldService {
        JOIN vaults v ON e.vault_id = v.id
        WHERE v.contract_id = $1`,
       [contractId],
-      timeoutMs ? { timeoutMs } : undefined,
     );
 
     const totalEpochs = BigInt(rows[0]?.total_epochs ?? "0");

@@ -17,6 +17,9 @@ import { analyticsRouter } from "./api/routes/analytics.js";
 import { proxyRouter } from "./api/routes/proxy.js";
 import { errorHandler } from "./api/middleware/errors.js";
 import { requestId } from "./api/middleware/requestId.js";
+import { requestContext } from "./api/middleware/requestContext.js";
+import { responseSizeLimit } from "./api/middleware/responseSizeLimit.js";
+import { cacheControl } from "./api/middleware/cacheControl.js";
 import { internalAuth } from "./api/middleware/internalAuth.js";
 import { internalRouter } from "./api/routes/internal.js";
 import { publicLimiter, authLimiter } from "./api/middleware/rateLimit.js";
@@ -59,6 +62,9 @@ export function createApp(): Express {
   }
 
   app.use(requestId);
+  app.use(requestContext);
+  app.use(responseSizeLimit());
+  app.use(cacheControl());
 
   app.use((req, res, next) => {
     res.on("finish", () => {

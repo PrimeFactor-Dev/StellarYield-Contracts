@@ -156,7 +156,6 @@ export async function getYieldSummary(req: Request, res: Response, next: NextFun
   try {
     const summary = await yieldService.getYieldSummary(
       String(req.params["contractId"]),
-      req.queryTimeoutMs,
     );
     res.json(summary);
   } catch (err) {

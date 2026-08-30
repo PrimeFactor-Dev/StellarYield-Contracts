@@ -4,10 +4,7 @@ import { config } from "../../config.js";
 
 export function queryTimeoutMiddleware() {
   return (req: Request, _res: Response, next: NextFunction) => {
-    const routePath = req.route?.path ?? req.path;
-    const fullRoute = `${req.baseUrl}${routePath}`;
-    const timeoutMs = config.routeQueryTimeoutsMs[fullRoute] ?? config.queryTimeoutMs;
-    req.queryTimeoutMs = timeoutMs;
+    req.queryTimeoutMs = config.db.queryTimeoutMs;
     next();
   };
 }

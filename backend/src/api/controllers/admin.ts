@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Request, Response, NextFunction } from "express";
-import { query } from "../../db/index.js";
+import { query, pool } from "../../db/index.js";
 import { indexer } from "../../services/indexerSingleton.js";
 import { jobQueue } from "../../services/jobQueue.js";
 import { sseManager } from "../../services/sseManager.js";
@@ -1234,53 +1234,151 @@ export function streamIndexerProgress(req: Request, res: Response): void {
   sseManager.addIndexerClient(req, res);
 }
 
-export async function getApiDiff(req: Request, res: Response, next: NextFunction) {
+/** GET /api/v1/admin/db/slow-queries — retrieve recent slow queries (#963) */
+export async function getSlowQueries(_req: Request, res: Response, next: NextFunction) {
   try {
-    const from = req.query["from"] as string | undefined;
-    const to = req.query["to"] as string | undefined;
+    const rows = await query<{
+      id: number;
+      query_hash: string;
+      query_preview: string;
+      duration_ms: string | number;
+      route: string | null;
+      occurred_at: Date;
+    }>(
+      `SELECT id, query_hash, query_preview, duration_ms, route, occurred_at
+       FROM slow_query_log
+       ORDER BY occurred_at DESC
+       LIMIT 50`,
+    );
 
-    if (!from || !to) {
-      res.status(400).json({ error: "BadRequest", message: "Both 'from' and 'to' query parameters are required" });
+    res.json(
+      rows.map((row) => ({
+        id: row.id,
+        query_hash: row.query_hash,
+        query_preview: row.query_preview,
+        duration_ms: typeof row.duration_ms === "string" ? parseFloat(row.duration_ms) : row.duration_ms,
+        route: row.route,
+        occurred_at: row.occurred_at,
+      })),
+    );
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ── Issue #961: Benchmark reporting ──────────────────────────────────────────
+
+const benchmarkPostSchema = z.object({
+  name: z.string().min(1).max(255),
+  p50: z.number(),
+  p95: z.number(),
+  p99: z.number(),
+  errorRate: z.number().min(0).max(1),
+  timestamp: z.string().datetime(),
+}).strict();
+
+export async function postBenchmark(req: Request, res: Response, next: NextFunction) {
+  try {
+    const parsed = benchmarkPostSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "BadRequest", message: "Invalid benchmark payload", details: parsed.error.issues });
       return;
     }
 
-    // Validate version strings - only v1 and v2 are valid
-    const validVersions = ["v1", "v2"];
-    if (!validVersions.includes(from) || !validVersions.includes(to)) {
-      res.status(400).json({ error: "BadRequest", message: "Invalid version. Only 'v1' and 'v2' are supported" });
+    const { name, p50, p95, p99, errorRate, timestamp } = parsed.data;
+
+    await query(
+      `INSERT INTO benchmark_results (name, p50, p95, p99, error_rate, timestamp)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [name, p50, p95, p99, errorRate, timestamp],
+    );
+
+    await logAdminAudit(req, "post_benchmark", `/api/v1/admin/benchmarks`);
+
+    res.status(201).json({ name, p50, p95, p99, errorRate, timestamp });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getBenchmarksByName(req: Request, res: Response, next: NextFunction) {
+  try {
+    const name = String(req.params["name"]);
+
+    const rows = await query<{
+      p50: number;
+      p95: number;
+      p99: number;
+      error_rate: number;
+      timestamp: Date;
+      created_at: Date;
+    }>(
+      `SELECT p50, p95, p99, error_rate, timestamp, created_at
+       FROM benchmark_results
+       WHERE name = $1
+       ORDER BY timestamp DESC`,
+      [name],
+    );
+
+    res.json({
+      name,
+      results: rows.map((r) => ({
+        p50: r.p50,
+        p95: r.p95,
+        p99: r.p99,
+        errorRate: r.error_rate,
+        timestamp: r.timestamp,
+        createdAt: r.created_at,
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ── Issue #962: Database VACUUM/ANALYZE ──────────────────────────────────────
+
+const APP_TABLES = [
+  "vaults", "users", "epochs", "user_vault_positions",
+  "indexed_events", "indexer_state", "webhooks", "webhook_deliveries",
+  "api_keys", "redemption_requests", "share_balance_snapshots",
+  "admin_audit_log", "app_config",
+];
+
+const vacuumSchema = z.object({
+  tables: z.array(z.string()).optional(),
+  analyze: z.boolean(),
+}).strict();
+
+export async function vacuumDatabase(req: Request, res: Response, next: NextFunction) {
+  try {
+    const parsed = vacuumSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "BadRequest", message: "Invalid payload", details: parsed.error.issues });
       return;
     }
 
-    // Load the spec files
-    const { readFileSync } = await import("node:fs");
-    const { resolve, dirname } = await import("node:path");
-    const { fileURLToPath } = await import("node:url");
+    const targetTables = parsed.data.tables?.length ? parsed.data.tables : APP_TABLES;
+    const analyze = parsed.data.analyze;
+    const command = analyze ? "VACUUM (ANALYZE)" : "VACUUM";
 
-    const __dirname = dirname(fileURLToPath(import.meta.url));
-    const openapiDir = resolve(__dirname, "../../openapi");
-
-    let fromSpec: any;
-    let toSpec: any;
-
+    const client = await pool.connect();
     try {
-      fromSpec = JSON.parse(readFileSync(resolve(openapiDir, `${from}.json`), "utf8"));
-      toSpec = JSON.parse(readFileSync(resolve(openapiDir, `${to}.json`), "utf8"));
-    } catch (_err) {
-      res.status(500).json({ error: "InternalServerError", message: "Failed to load OpenAPI spec files" });
-      return;
+      await client.query("BEGIN");
+      for (const table of targetTables) {
+        await client.query(`${command} ${table}`);
+      }
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
     }
 
-    // Compare paths
-    const fromPaths = Object.keys(fromSpec.paths ?? {});
-    const toPaths = Object.keys(toSpec.paths ?? {});
+    await logAdminAudit(req, "vacuum_database", "/api/v1/admin/db/vacuum");
 
-    const added = toPaths.filter((p) => !fromPaths.includes(p));
-    const removed = fromPaths.filter((p) => !toPaths.includes(p));
-    const modified = fromPaths
-      .filter((p) => toPaths.includes(p))
-      .filter((p) => JSON.stringify(fromSpec.paths[p]) !== JSON.stringify(toSpec.paths[p]));
-
-    res.json({ added, removed, modified });
+    res.json({ ok: true, tables: targetTables, analyze, command });
   } catch (err) {
     next(err);
   }
