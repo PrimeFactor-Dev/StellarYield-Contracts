@@ -323,6 +323,69 @@ export async function getApiKeys(_req: Request, res: Response, next: NextFunctio
   }
 }
 
+export async function updateApiKeyDescription(req: Request, res: Response, next: NextFunction) {
+  try {
+    const keyId = String(req.params["id"]);
+    const idNum = parseInt(keyId, 10);
+
+    if (isNaN(idNum) || idNum <= 0) {
+      res.status(400).json({ error: "BadRequest", message: "Invalid key ID" });
+      return;
+    }
+
+    const descriptionSchema = z.object({
+      description: z.string().nullable(),
+    });
+
+    const parsed = descriptionSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "BadRequest", message: "Invalid request body" });
+      return;
+    }
+
+    const { description } = parsed.data;
+
+    // Check if key exists
+    const existingRows = await query<{ id: number }>("SELECT id FROM api_keys WHERE id = $1", [idNum]);
+
+    if (existingRows.length === 0) {
+      res.status(404).json({ error: "NotFound", message: "API key not found" });
+      return;
+    }
+
+    // Update only the description field
+    await query(
+      "UPDATE api_keys SET description = $1 WHERE id = $2",
+      [description, idNum],
+    );
+
+    // Return the updated key
+    const updatedRows = await query<{
+      id: number;
+      label: string | null;
+      role: string;
+      created_at: Date;
+      expires_at: Date | null;
+      description: string | null;
+    }>(
+      "SELECT id, label, role, created_at, expires_at, description FROM api_keys WHERE id = $1",
+      [idNum],
+    );
+
+    const updatedKey = updatedRows[0];
+    res.json({
+      id: updatedKey.id,
+      label: updatedKey.label,
+      role: updatedKey.role,
+      createdAt: updatedKey.created_at,
+      expiresAt: updatedKey.expires_at,
+      description: updatedKey.description,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getWebhookDeliveries(req: Request, res: Response, next: NextFunction) {
   try {
     const webhookId = parseInt(req.params["id"] as string, 10);

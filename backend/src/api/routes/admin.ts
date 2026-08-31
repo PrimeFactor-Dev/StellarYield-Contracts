@@ -7,6 +7,7 @@ import {
   backfillIndexer,
   deleteApiKey,
   getApiKeys,
+  updateApiKeyDescription,
   getWebhookDeliveries,
   bulkToggleWebhooks,
   getArchivedVaults,
@@ -70,6 +71,8 @@ adminRouter.get("/vaults/archived", getArchivedVaults);
 adminRouter.get("/consistency/total-supply", getTotalSupplyConsistency);
 adminRouter.get("/api-keys", getApiKeys);
 adminRouter.delete("/api-keys/:id", requireApiKey({ role: "admin" }), deleteApiKey);
+adminRouter.patch("/api-keys/:id/description", requireApiKey({ role: "admin" }), updateApiKeyDescription);
+adminRouter.get("/api-diff", getApiDiff);
 adminRouter.get("/webhooks/:id/deliveries", getWebhookDeliveries);
 // Issue #1006: bulk webhook enable/disable
 adminRouter.post("/webhooks/bulk/toggle", requireApiKey({ role: "admin" }), bulkToggleWebhooks);
