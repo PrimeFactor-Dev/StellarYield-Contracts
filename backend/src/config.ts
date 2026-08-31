@@ -1,7 +1,8 @@
 import "dotenv/config";
 import { z } from "zod";
+import cron from "node-cron";
 
-const envSchema = z.object({
+export const envSchema = z.object({
   PORT: z
     .string()
     .transform((v) => parseInt(v, 10))
@@ -136,6 +137,12 @@ const envSchema = z.object({
     .default("90")
     .transform((v) => parseInt(v, 10))
     .pipe(z.number().int().min(1)),
+  ARCHIVE_CRON: z
+    .string()
+    .default("0 2 * * *")
+    .refine((v) => cron.validate(v), {
+      message: "ARCHIVE_CRON must be a valid cron expression",
+    }),
   ADMIN_IP_ALLOWLIST: z
     .string()
     .default(""),
@@ -245,6 +252,9 @@ export const config = {
   },
   get enableSandboxReset() {
     return (process.env.ENABLE_SANDBOX_RESET ?? String(parsed.data.ENABLE_SANDBOX_RESET)).toLowerCase() === "true" || process.env.ENABLE_SANDBOX_RESET === "1";
+  },
+  get archiveCron(): string {
+    return process.env.ARCHIVE_CRON ?? parsed.data.ARCHIVE_CRON;
   },
 
   stellar: {
