@@ -7,6 +7,7 @@ import {
   backfillIndexer,
   deleteApiKey,
   getApiKeys,
+  updateApiKeyDescription,
   getWebhookDeliveries,
   bulkToggleWebhooks,
   getArchivedVaults,
@@ -38,6 +39,8 @@ import {
   getSecurityHeadersAudit,
   resetSandboxData,
   getSecurityEvents,
+  toggleVaultArchiveExclusion,
+  verifyArchiveConsistency,
 } from "../controllers/admin.js";
 import { requireApiKey } from "../middleware/auth.js";
 import { ipAllowlist } from "../middleware/ipAllowlist.js";
@@ -68,9 +71,13 @@ adminRouter.post("/indexer/backfill", requireApiKey({ role: "admin" }), backfill
 adminRouter.get("/events", getAdminEvents);
 adminRouter.get("/vaults/:contractId/audit", getVaultAudit);
 adminRouter.get("/vaults/archived", getArchivedVaults);
+adminRouter.patch("/vaults/:contractId/archive-exclusion", requireApiKey({ role: "admin" }), toggleVaultArchiveExclusion);
+adminRouter.get("/archive/verify", verifyArchiveConsistency);
 adminRouter.get("/consistency/total-supply", getTotalSupplyConsistency);
 adminRouter.get("/api-keys", getApiKeys);
 adminRouter.delete("/api-keys/:id", requireApiKey({ role: "admin" }), deleteApiKey);
+adminRouter.patch("/api-keys/:id/description", requireApiKey({ role: "admin" }), updateApiKeyDescription);
+adminRouter.get("/api-diff", getApiDiff);
 adminRouter.get("/webhooks/:id/deliveries", getWebhookDeliveries);
 // Issue #1006: bulk webhook enable/disable
 adminRouter.post("/webhooks/bulk/toggle", requireApiKey({ role: "admin" }), bulkToggleWebhooks);

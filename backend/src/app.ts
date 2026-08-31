@@ -14,8 +14,10 @@ import { adminRouter } from "./api/routes/admin.js";
 import { factoryRouter } from "./api/routes/factory.js";
 import { webhooksRouter } from "./api/routes/webhooks.js";
 import { validateRouter } from "./api/routes/validate.js";
+import { codegenRouter } from "./api/routes/codegen.js";
 import { notificationsRouter } from "./api/routes/notifications.js";
 import { analyticsRouter } from "./api/routes/analytics.js";
+import { proxyRouter } from "./api/routes/proxy.js";
 import { errorHandler } from "./api/middleware/errors.js";
 import { requestId } from "./api/middleware/requestId.js";
 import { requestContext } from "./api/middleware/requestContext.js";
@@ -116,10 +118,11 @@ export function createApp(): Express {
   app.use("/api/v1/factory", publicLimiter, factoryRouter);
   app.use("/api/v1/admin/notifications", authLimiter, notificationsRouter);
   app.use("/api/v1/admin", authLimiter, adminRouter);
-  app.use("/api/v1/factory", publicLimiter, factoryRouter);
   app.use("/api/v1/webhooks", authLimiter, webhooksRouter);
   // Request body dry run — validation only, never a side effect (#941)
   app.use("/api/v1/validate", publicLimiter, validateRouter);
+  // SDK snippet generator — curl / TypeScript codegen from the OpenAPI spec (#943)
+  app.use("/api/v1/codegen", publicLimiter, codegenRouter);
   app.use("/internal", authLimiter, internalAuth, internalRouter);
   // SDL export for client codegen tools (e.g. graphql-codegen); cached since the
   // schema only changes on server restart (#773). Registered before the Apollo

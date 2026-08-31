@@ -16,6 +16,7 @@ interface ApiKey {
   active: boolean;
   allowedMethods: string[] | null;
   rateLimitOverride?: number | null;
+  allowedCidrs: string[] | null;
 }
 
 interface AdminSessionClaims extends JwtPayload {
@@ -47,6 +48,41 @@ async function lookupApiKeyByPlaintext(plaintext: string): Promise<ApiKey | null
       [keyHash],
     )) ?? [];
     return rows[0] ?? null;
+function parseIpv4(ip: string): number {
+  const parts = ip.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((p) => isNaN(p) || p < 0 || p > 255)) {
+    return -1;
+  }
+  return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+}
+
+function ipMatchesCidr(ip: string, cidr: string): boolean {
+  const [rangeIp, bitsStr] = cidr.split("/");
+  const bits = bitsStr ? parseInt(bitsStr, 10) : 32;
+
+  if (isNaN(bits) || bits < 0 || bits > 32) return false;
+
+  const ipNum = parseIpv4(ip);
+  const rangeNum = parseIpv4(rangeIp);
+
+  if (ipNum === -1 || rangeNum === -1) return false;
+
+  const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
+  return (ipNum & mask) === (rangeNum & mask);
+}
+
+function isIpAllowedByCidrs(ip: string, allowedCidrs: string[] | null): boolean {
+  if (!allowedCidrs || allowedCidrs.length === 0) return true;
+  return allowedCidrs.some((cidr) => ipMatchesCidr(ip, cidr));
+}
+
+async function lookupApiKeyCidrsById(keyId: number): Promise<string[] | null> {
+  try {
+    const rows = await query<{ allowed_cidrs: string[] | null }>(
+      "SELECT allowed_cidrs FROM api_keys WHERE id = $1",
+      [keyId],
+    );
+    return rows[0]?.allowed_cidrs ?? null;
   } catch {
     return null;
   }
@@ -98,6 +134,7 @@ async function lookupApiKeyByPlaintext(plaintext: string): Promise<ApiKey | null
     const rows = (await query<ApiKey>(
       `SELECT id, role, label, expires_at AS "expiresAt", last_used_at AS "lastUsedAt", active,
               allowed_methods AS "allowedMethods", rate_limit_override AS "rateLimitOverride"
+              allowed_methods AS "allowedMethods", allowed_cidrs AS "allowedCidrs"
        FROM api_keys WHERE key_hash = $1`,
       [keyHash],
     )) ?? [];
@@ -128,6 +165,10 @@ function verifyAdminSession(token: string): ApiKey | null {
     // A session can only exist because an active key authenticated the login.
     active: true,
     allowedMethods: Array.isArray(claims.allowedMethods) ? claims.allowedMethods : null,
+    // CIDR restrictions are not carried in the JWT; they are checked via the
+    // underlying API key lookup when a raw key is presented. For session tokens,
+    // the CIDR check was already applied at login time.
+    allowedCidrs: null,
   };
 }
 
@@ -250,6 +291,25 @@ export function requireApiKey(options?: { role?: string; minRole?: "readonly" | 
               reason: "insufficient_permissions",
             });
             res.status(403).json({ error: "Forbidden", message: "Insufficient permissions" });
+            return;
+          }
+        }
+
+        // Per-key IP CIDR restriction (#928): look up the underlying key's
+        // allowed_cidrs and reject if the request IP is not in the list.
+        if (sessionApiKey.id > 0) {
+          const allowedCidrs = await lookupApiKeyCidrsById(sessionApiKey.id);
+          if (!isIpAllowedByCidrs(ip, allowedCidrs)) {
+            logger.info({
+              event: "auth_attempt",
+              success: false,
+              ip,
+              keyLabel: sessionApiKey.label,
+              path: req.path,
+              method: req.method,
+              reason: "ip_not_allowed",
+            });
+            res.status(403).json({ error: "Forbidden", message: "IP not allowed by key CIDR restriction" });
             return;
           }
         }
@@ -379,6 +439,22 @@ export function requireApiKey(options?: { role?: string; minRole?: "readonly" | 
         res.status(403).json({ error: "Forbidden", message: "Insufficient permissions" });
         return;
       }
+    }
+
+    // Per-key IP CIDR restriction (#928): reject if the request IP is not in
+    // the key's allowed_cidrs list. A NULL/empty list means any IP is allowed.
+    if (!isIpAllowedByCidrs(ip, apiKey.allowedCidrs)) {
+      logger.info({
+        event: "auth_attempt",
+        success: false,
+        ip,
+        keyLabel: apiKey.label,
+        path: req.path,
+        method: req.method,
+        reason: "ip_not_allowed",
+      });
+      res.status(403).json({ error: "Forbidden", message: "IP not allowed by key CIDR restriction" });
+      return;
     }
 
     logger.info({

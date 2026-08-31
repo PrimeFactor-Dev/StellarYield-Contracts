@@ -329,9 +329,10 @@ export async function getApiKeys(_req: Request, res: Response, next: NextFunctio
       active: boolean;
       deactivated_at: Date | null;
       allowed_methods: string[] | null;
+      allowed_cidrs: string[] | null;
     }>(
       `SELECT id, label, role, created_at, expires_at, last_used_at, active, deactivated_at,
-              allowed_methods
+              allowed_methods, allowed_cidrs
        FROM api_keys ORDER BY created_at DESC`,
     );
 
@@ -349,8 +350,73 @@ export async function getApiKeys(_req: Request, res: Response, next: NextFunctio
         deactivatedAt: row.deactivated_at ?? null,
         // null means the key may use any HTTP method (#935)
         allowedMethods: row.allowed_methods ?? null,
+        // null means the key may be used from any IP (#928)
+        allowedCidrs: row.allowed_cidrs ?? null,
       })),
     );
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function updateApiKeyDescription(req: Request, res: Response, next: NextFunction) {
+  try {
+    const keyId = String(req.params["id"]);
+    const idNum = parseInt(keyId, 10);
+
+    if (isNaN(idNum) || idNum <= 0) {
+      res.status(400).json({ error: "BadRequest", message: "Invalid key ID" });
+      return;
+    }
+
+    const descriptionSchema = z.object({
+      description: z.string().nullable(),
+    });
+
+    const parsed = descriptionSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "BadRequest", message: "Invalid request body" });
+      return;
+    }
+
+    const { description } = parsed.data;
+
+    // Check if key exists
+    const existingRows = await query<{ id: number }>("SELECT id FROM api_keys WHERE id = $1", [idNum]);
+
+    if (existingRows.length === 0) {
+      res.status(404).json({ error: "NotFound", message: "API key not found" });
+      return;
+    }
+
+    // Update only the description field
+    await query(
+      "UPDATE api_keys SET description = $1 WHERE id = $2",
+      [description, idNum],
+    );
+
+    // Return the updated key
+    const updatedRows = await query<{
+      id: number;
+      label: string | null;
+      role: string;
+      created_at: Date;
+      expires_at: Date | null;
+      description: string | null;
+    }>(
+      "SELECT id, label, role, created_at, expires_at, description FROM api_keys WHERE id = $1",
+      [idNum],
+    );
+
+    const updatedKey = updatedRows[0];
+    res.json({
+      id: updatedKey.id,
+      label: updatedKey.label,
+      role: updatedKey.role,
+      createdAt: updatedKey.created_at,
+      expiresAt: updatedKey.expires_at,
+      description: updatedKey.description,
+    });
   } catch (err) {
     next(err);
   }
@@ -1545,6 +1611,108 @@ export async function getBenchmarksByName(req: Request, res: Response, next: Nex
         createdAt: r.created_at,
       })),
     });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ── Issue #926: Vault archive exclusion toggle ──────────────────────────────
+export async function toggleVaultArchiveExclusion(req: Request, res: Response, next: NextFunction) {
+  try {
+    const parsed = contractAddressSchema.safeParse(req.params["contractId"]);
+    if (!parsed.success) {
+      res.status(400).json({ error: "BadRequest", message: "Invalid contractId format" });
+      return;
+    }
+    const contractId = parsed.data;
+
+    const bodySchema = z.object({ excludeFromArchive: z.boolean() });
+    const bodyParsed = bodySchema.safeParse(req.body);
+    if (!bodyParsed.success) {
+      res.status(400).json({ error: "BadRequest", message: "excludeFromArchive must be a boolean" });
+      return;
+    }
+    const { excludeFromArchive } = bodyParsed.data;
+
+    const rows = await query<{ id: number }>(
+      "SELECT id FROM vaults WHERE contract_id = $1",
+      [contractId],
+    );
+    if (rows.length === 0) {
+      res.status(404).json({ error: "NotFound", message: "Vault not found" });
+      return;
+    }
+
+    await query(
+      "UPDATE vaults SET exclude_from_archive = $1, updated_at = NOW() WHERE contract_id = $2",
+      [excludeFromArchive, contractId],
+    );
+
+    await logAdminAudit(req, "toggle_vault_archive_exclusion", `/api/v1/admin/vaults/${contractId}/archive-exclusion`);
+
+    res.json({ contractId, excludeFromArchive });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ── Issue #927: Archival verification ────────────────────────────────────────
+const ARCHIVABLE_TABLES = ["indexed_events", "share_balance_snapshots", "vault_tvl_snapshots"];
+
+export async function verifyArchiveConsistency(_req: Request, res: Response, next: NextFunction) {
+  try {
+    const tableResults: {
+      name: string;
+      liveRows: number;
+      archiveRows: number;
+      totalRows: number;
+      consistent: boolean;
+    }[] = [];
+
+    for (const table of ARCHIVABLE_TABLES) {
+      const liveRowsResult = await query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM ${table}`,
+      );
+      const liveRows = parseInt(liveRowsResult[0]?.count ?? "0", 10);
+
+      const archiveTable = `${table}_archive`;
+      let archiveRows = 0;
+      try {
+        const archiveRowsResult = await query<{ count: string }>(
+          `SELECT COUNT(*)::text AS count FROM ${archiveTable}`,
+        );
+        archiveRows = parseInt(archiveRowsResult[0]?.count ?? "0", 10);
+      } catch {
+        // Archive table may not exist yet
+      }
+
+      const totalRows = liveRows + archiveRows;
+
+      const auditResult = await query<{ pre_archival_count: string }>(
+        `SELECT pre_archival_count::text
+         FROM archive_audit_log
+         WHERE table_name = $1
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [table],
+      );
+
+      let consistent = true;
+      if (auditResult.length > 0) {
+        const preArchivalCount = parseInt(auditResult[0].pre_archival_count, 10);
+        consistent = totalRows === preArchivalCount;
+      }
+
+      tableResults.push({
+        name: table,
+        liveRows,
+        archiveRows,
+        totalRows,
+        consistent,
+      });
+    }
+
+    res.json({ tables: tableResults });
   } catch (err) {
     next(err);
   }

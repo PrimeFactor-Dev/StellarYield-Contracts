@@ -8,6 +8,7 @@ function parseArgs(argv: string[]) {
   let role = "admin";
   let expiresInDays: number | null = null;
   let allowedMethods: string[] | null = null;
+  let allowedCidrs: string[] | null = null;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -40,13 +41,26 @@ function parseArgs(argv: string[]) {
       if (allowedMethods.length === 0) {
         throw new Error("--allowed-methods requires at least one HTTP method");
       }
+    } else if (arg === "--allowed-cidrs") {
+      // Comma-separated CIDR ranges the key may be used from; omit to allow all.
+      const value = argv[++i];
+      if (!value) {
+        throw new Error("--allowed-cidrs requires a comma-separated list of CIDR ranges");
+      }
+      allowedCidrs = value
+        .split(",")
+        .map((cidr) => cidr.trim())
+        .filter(Boolean);
+      if (allowedCidrs.length === 0) {
+        throw new Error("--allowed-cidrs requires at least one CIDR range");
+      }
     }
   }
 
-  return { role, expiresInDays, allowedMethods };
+  return { role, expiresInDays, allowedMethods, allowedCidrs };
 }
 
-const { role, expiresInDays, allowedMethods } = parseArgs(process.argv.slice(2));
+const { role, expiresInDays, allowedMethods, allowedCidrs } = parseArgs(process.argv.slice(2));
 
 const plaintext = randomBytes(32).toString("hex");
 const keyHash = createHash("sha256").update(plaintext).digest("hex");
@@ -55,9 +69,9 @@ const expiresAt = expiresInDays !== null
   : null;
 
 await query(
-  `INSERT INTO api_keys (key_hash, role, label, expires_at, allowed_methods)
-   VALUES ($1, $2, $3, $4, $5)`,
-  [keyHash, role, `generated-${Date.now()}`, expiresAt, allowedMethods],
+  `INSERT INTO api_keys (key_hash, role, label, expires_at, allowed_methods, allowed_cidrs)
+   VALUES ($1, $2, $3, $4, $5, $6)`,
+  [keyHash, role, `generated-${Date.now()}`, expiresAt, allowedMethods, allowedCidrs],
 );
 
 console.log(plaintext);
