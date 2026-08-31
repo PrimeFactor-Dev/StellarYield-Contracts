@@ -66,18 +66,51 @@ interface WebhookRow {
   fallback_channel: number | null;
 }
 
+const GLOBAL_OPT_OUT_KEY = "notificationsGloballyEnabled";
+
 /** Max delivery attempts before a webhook_deliveries row is considered exhausted. */
 const MAX_DELIVERY_ATTEMPTS = 6;
 
 export class NotificationService {
   /**
+   * Whether notification dispatch is globally enabled (#994).
+   * Backed by the `app_config` key/value table (#804); defaults to enabled
+   * if the key has never been set (e.g. on a database seeded before this
+   * migration ran).
+   */
+  async isGloballyEnabled(): Promise<boolean> {
+    const rows = await query<{ value: string }>(
+      "SELECT value FROM app_config WHERE key = $1",
+      [GLOBAL_OPT_OUT_KEY],
+    );
+    if (rows.length === 0) return true;
+    return rows[0].value === "true";
+  }
+
+  /**
+   * Set the global notification opt-out flag (#994). When disabled, `notify`
+   * short-circuits before any webhook is dispatched.
+   */
+  async setGloballyEnabled(enabled: boolean): Promise<void> {
+    await query(
+      `INSERT INTO app_config (key, value, updated_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
+      [GLOBAL_OPT_OUT_KEY, String(enabled)],
+    );
+  }
+
+  /**
    * Dispatch an event notification to all active webhooks subscribed to it.
    *
    * @remarks Each webhook payload is HMAC-SHA256 signed with the webhook's
    * secret (if configured) before delivery. Refer to {@link deliver} for the
-   * signing and SSRF-safe delivery logic.
+   * signing and SSRF-safe delivery logic. Skips dispatch entirely when the
+   * global opt-out flag is set (#994).
    */
   async notify(event: string, data: Record<string, unknown>): Promise<void> {
+    if (!(await this.isGloballyEnabled())) return;
+
     const webhooks = await query<WebhookRow>(
       `SELECT id, url, events, secret, consecutive_failures, channel, priority, fallback_channel
        FROM webhooks
