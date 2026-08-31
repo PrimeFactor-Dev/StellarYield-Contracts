@@ -143,6 +143,10 @@ export const envSchema = z.object({
     .refine((v) => cron.validate(v), {
       message: "ARCHIVE_CRON must be a valid cron expression",
     }),
+  DRY_RUN: z
+    .string()
+    .default("false")
+    .transform((v) => ["true", "1", "yes"].includes(v.toLowerCase())),
   ADMIN_IP_ALLOWLIST: z
     .string()
     .default(""),
@@ -255,6 +259,9 @@ export const config = {
   },
   get archiveCron(): string {
     return process.env.ARCHIVE_CRON ?? parsed.data.ARCHIVE_CRON;
+  },
+  get dryRun(): boolean {
+    return ["true", "1", "yes"].includes((process.env.DRY_RUN ?? String(parsed.data.DRY_RUN)).toLowerCase());
   },
 
   stellar: {

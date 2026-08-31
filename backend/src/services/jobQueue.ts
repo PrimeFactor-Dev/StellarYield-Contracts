@@ -144,7 +144,8 @@ class JobQueue {
     await this.boss.work<Record<string, unknown>>("archival", async (jobs: Job<Record<string, unknown>>[]) => {
       for (const _job of jobs) {
         await runWithMetrics("archival", async () => {
-          logger.info("Running scheduled archival job");
+          const { runArchival } = await import("./archivalService.js");
+          await runArchival();
         });
       }
     });
