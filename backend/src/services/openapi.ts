@@ -754,6 +754,54 @@ function registerPaths(): void {
   });
 
   registry.registerPath({
+    method: "post",
+    path: "/api/v1/codegen",
+    summary: "Generate a curl or TypeScript snippet for calling a documented route",
+    description:
+      "Uses this OpenAPI document as the template source: path and query parameters, "
+      + "request bodies and the \"requires API key\" note are all read from the spec. "
+      + "Returns 404 when no documented route matches.",
+    tags: ["Codegen"],
+    request: {
+      body: {
+        content: {
+          "application/json": {
+            schema: z.object({
+              route: z.string().openapi({ example: "/api/v1/vaults/{contractId}" }),
+              method: z.string().openapi({ example: "GET" }),
+              params: z.record(z.unknown()).optional().openapi({ example: { contractId: "CAAA..." } }),
+              language: z.enum(["typescript", "curl"]).openapi({ example: "curl" }),
+            }),
+          },
+        },
+      },
+    },
+    responses: {
+      200: {
+        description: "The generated snippet and the resolved request URL",
+        content: {
+          "application/json": {
+            schema: z.object({
+              language: z.enum(["typescript", "curl"]),
+              method: z.string(),
+              url: z.string(),
+              snippet: z.string(),
+            }),
+          },
+        },
+      },
+      400: {
+        description: "Malformed request (missing route, method or an unsupported language)",
+        content: { "application/json": { schema: errorResponseSchema } },
+      },
+      404: {
+        description: "No documented route matches the given route and method",
+        content: { "application/json": { schema: errorResponseSchema } },
+      },
+    },
+  });
+
+  registry.registerPath({
     method: "get",
     path: "/api/v1/factory/vault-creation-rate",
     summary: "Get vault creation rate over rolling windows",
