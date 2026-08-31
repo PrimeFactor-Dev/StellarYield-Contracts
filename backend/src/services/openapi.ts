@@ -97,6 +97,7 @@ const adminStatsSchema = z.object({
   userCount: z.number(),
   totalValueLocked: z.string(),
   epochCount: z.number(),
+  archiveSizeBytes: z.number(),
 });
 
 const indexerStatusSchema = z.object({
@@ -704,6 +705,50 @@ function registerPaths(): void {
             ),
           },
         },
+      },
+    },
+  });
+
+  registry.registerPath({
+    method: "post",
+    path: "/api/v1/validate",
+    summary: "Validate a request body against a route's schema without executing it",
+    description:
+      "Dry run: performs exactly the validation the target route performs and nothing else. "
+      + "Returns 404 when no schema is registered for the given route and method.",
+    tags: ["Validation"],
+    request: {
+      body: {
+        content: {
+          "application/json": {
+            schema: z.object({
+              route: z.string().openapi({ example: "/api/v1/webhooks" }),
+              method: z.string().openapi({ example: "POST" }),
+              body: z.unknown(),
+            }),
+          },
+        },
+      },
+    },
+    responses: {
+      200: {
+        description: "Validation result; `errors` is null when the body is valid",
+        content: {
+          "application/json": {
+            schema: z.object({
+              valid: z.boolean(),
+              errors: z.array(z.record(z.unknown())).nullable(),
+            }),
+          },
+        },
+      },
+      400: {
+        description: "Malformed dry-run request (missing route, method or body)",
+        content: { "application/json": { schema: errorResponseSchema } },
+      },
+      404: {
+        description: "No request body schema is registered for that route and method",
+        content: { "application/json": { schema: errorResponseSchema } },
       },
     },
   });

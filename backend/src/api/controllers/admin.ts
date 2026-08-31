@@ -1,11 +1,17 @@
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import type { Request, Response, NextFunction } from "express";
+import Cursor from "pg-cursor";
+import { stringify } from "csv-stringify";
+import { z } from "zod";
 import { query, pool } from "../../db/index.js";
+import { config } from "../../config.js";
+import { seed } from "../../db/seed.js";
 import { indexer } from "../../services/indexerSingleton.js";
 import { jobQueue } from "../../services/jobQueue.js";
 import { sseManager } from "../../services/sseManager.js";
 import { logger } from "../../logger.js";
-import { z } from "zod";
+import { createAdminSessionToken, refreshAdminSessionToken } from "../middleware/auth.js";
 
 const stellarAddressSchema = z.string().length(56).regex(/^G[A-Z2-7]{55}$/);
 const contractAddressSchema = z.string().length(56).regex(/^C[A-Z2-7]{55}$/);
@@ -38,19 +44,163 @@ async function logAdminAudit(req: Request, action: string, target: string): Prom
   );
 }
 
+interface ApiKeyRecord {
+  id: number;
+  role: string;
+  label: string | null;
+  expiresAt: Date | null;
+  active: boolean;
+  allowedMethods: string[] | null;
+}
+
+async function findApiKeyByValue(plaintext: string): Promise<ApiKeyRecord | null> {
+  const keyHash = createHash("sha256").update(plaintext).digest("hex");
+  const rows = await query<{
+    id: number;
+    role: string;
+    label: string | null;
+    expires_at: Date | null;
+    active: boolean | null;
+    allowed_methods: string[] | null;
+  }>(
+    'SELECT id, role, label, expires_at, active, allowed_methods FROM api_keys WHERE key_hash = $1',
+    [keyHash],
+  ).catch(() => []);
+
+  if (rows.length === 0) return null;
+  const row = rows[0];
+  return {
+    id: row.id,
+    role: row.role,
+    label: row.label,
+    expiresAt: row.expires_at,
+    active: row.active ?? true,
+    allowedMethods: row.allowed_methods ?? null,
+  };
+}
+
+export async function createAdminSession(req: Request, res: Response, next: NextFunction) {
+  try {
+    const parsed = z.object({ apiKey: z.string().min(1, "apiKey is required") }).safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "BadRequest", message: "Invalid request body" });
+      return;
+    }
+
+    const apiKey = await findApiKeyByValue(parsed.data.apiKey);
+    if (!apiKey) {
+      res.status(401).json({ error: "Unauthorized", message: "Invalid API key" });
+      return;
+    }
+
+    // A session must never outlive the key it is minted from, so the same
+    // lifecycle checks the auth middleware applies run here too (#934).
+    if (!apiKey.active) {
+      res.status(403).json({ error: "Forbidden", message: "API key has been deactivated" });
+      return;
+    }
+
+    if (apiKey.role !== "admin") {
+      res.status(403).json({ error: "Forbidden", message: "Admin API key required" });
+      return;
+    }
+
+    if (apiKey.expiresAt && apiKey.expiresAt.getTime() <= Date.now()) {
+      res.status(401).json({ error: "Unauthorized", message: "API key has expired" });
+      return;
+    }
+
+    // Exchanging a key for a session is an authentication, so it counts as use
+    // and must not reset the inactivity clock silently (#933).
+    void query("UPDATE api_keys SET last_used_at = NOW() WHERE id = $1", [apiKey.id]).catch(
+      (err: unknown) => {
+        logger.warn({ err, keyId: apiKey.id }, "Failed to update api_keys.last_used_at");
+      },
+    );
+
+    const token = createAdminSessionToken(apiKey);
+    res.json({ token, expiresInMinutes: config.adminSessionExpiryMinutes });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function refreshAdminSession(req: Request, res: Response, next: NextFunction) {
+  try {
+    const authHeader = req.headers.authorization ?? "";
+    if (!authHeader.startsWith("Bearer ")) {
+      res.status(401).json({ error: "Unauthorized", message: "Missing JWT" });
+      return;
+    }
+
+    const token = authHeader.slice("Bearer ".length).trim();
+    const refreshedToken = refreshAdminSessionToken(token);
+    res.json({ token: refreshedToken, expiresInMinutes: config.adminSessionExpiryMinutes });
+  } catch {
+    res.status(401).json({ error: "Unauthorized", message: "Invalid or expired JWT" });
+  }
+}
+
+export async function getSecurityHeadersAudit(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { default: supertest } = await import("supertest");
+    const healthResponse = await supertest(req.app).get("/health");
+
+    const headerNames = [
+      "x-content-type-options",
+      "x-frame-options",
+      "content-security-policy",
+      "strict-transport-security",
+    ];
+
+    const audit = headerNames.map((header) => {
+      const value = healthResponse.headers[header] ?? null;
+      return {
+        header,
+        value,
+        required: true,
+        present: Boolean(value),
+      };
+    });
+
+    res.json(audit);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function resetSandboxData(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (!config.enableSandboxReset) {
+      res.status(404).json({ error: "NotFound", message: "Sandbox reset is disabled" });
+      return;
+    }
+
+    await query("TRUNCATE TABLE indexed_events, yield_snapshots, vault_tvl_snapshots RESTART IDENTITY CASCADE");
+    await seed();
+    res.json({ success: true, tablesReset: ["indexed_events", "yield_snapshots", "vault_tvl_snapshots"] });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getAdminStats(_req: Request, res: Response, next: NextFunction) {
   try {
     const vaultCountRows = await query<{ count: string }>("SELECT COUNT(*)::text as count FROM vaults");
     const userCountRows = await query<{ count: string }>("SELECT COUNT(*)::text as count FROM users");
     const totalAssetsRows = await query<{ total: string }>("SELECT COALESCE(SUM(total_assets::numeric), 0)::text as total FROM vaults");
     const epochCountRows = await query<{ count: string }>("SELECT COUNT(*)::text as count FROM epochs");
+    const archiveSizeRows = await query<{ total: string }>(
+      "SELECT COALESCE(SUM(pg_total_relation_size(relid)), 0)::text AS total FROM pg_stat_user_tables WHERE relname LIKE '%_archive'",
+    );
 
     const vaultCount = parseInt(vaultCountRows[0]?.count ?? "0", 10);
     const userCount = parseInt(userCountRows[0]?.count ?? "0", 10);
     const totalValueLocked = totalAssetsRows[0]?.total ?? "0";
     const epochCount = parseInt(epochCountRows[0]?.count ?? "0", 10);
+    const archiveSizeBytes = parseInt(archiveSizeRows[0]?.total ?? "0", 10);
 
-    res.json({ vaultCount, userCount, totalValueLocked, epochCount });
+    res.json({ vaultCount, userCount, totalValueLocked, epochCount, archiveSizeBytes });
   } catch (err) {
     next(err);
   }
@@ -142,9 +292,14 @@ export async function getApiKeys(_req: Request, res: Response, next: NextFunctio
       role: string;
       created_at: Date;
       expires_at: Date | null;
-      description: string | null;
+      last_used_at: Date | null;
+      active: boolean;
+      deactivated_at: Date | null;
+      allowed_methods: string[] | null;
     }>(
-      "SELECT id, label, role, created_at, expires_at, description FROM api_keys ORDER BY created_at DESC",
+      `SELECT id, label, role, created_at, expires_at, last_used_at, active, deactivated_at,
+              allowed_methods
+       FROM api_keys ORDER BY created_at DESC`,
     );
 
     res.json(
@@ -154,7 +309,13 @@ export async function getApiKeys(_req: Request, res: Response, next: NextFunctio
         role: row.role,
         createdAt: row.created_at,
         expiresAt: row.expires_at,
-        description: row.description,
+        // null until the key authenticates a request for the first time (#933)
+        lastUsedAt: row.last_used_at ?? null,
+        // false once the inactivity sweep has retired the key (#934)
+        active: row.active,
+        deactivatedAt: row.deactivated_at ?? null,
+        // null means the key may use any HTTP method (#935)
+        allowedMethods: row.allowed_methods ?? null,
       })),
     );
   } catch (err) {
@@ -884,6 +1045,89 @@ export async function getPositionsSnapshot(req: Request, res: Response, next: Ne
     );
   } catch (err) {
     next(err);
+  }
+}
+
+/**
+ * GET /api/v1/admin/positions/export.csv
+ *
+ * Streams every user vault position as CSV (#950). Instead of buffering the
+ * whole result set in memory (see #430), a pg-cursor is read in batches and
+ * piped through a csv-stringify transform straight to the response, so memory
+ * use stays flat regardless of row count and the first bytes reach the client
+ * as soon as the first batch is read.
+ */
+const POSITIONS_EXPORT_COLUMNS = [
+  "user_address",
+  "vault_contract_id",
+  "shares",
+  "deposited",
+  "last_claimed_epoch",
+  "updated_at",
+] as const;
+
+export async function exportPositionsCsv(_req: Request, res: Response, next: NextFunction) {
+  const client = await pool.connect();
+  const cursor = client.query(
+    new Cursor(
+      `SELECT uvp.user_address,
+              v.contract_id           AS vault_contract_id,
+              uvp.shares::text        AS shares,
+              uvp.deposited::text     AS deposited,
+              uvp.last_claimed_epoch,
+              uvp.updated_at
+         FROM user_vault_positions uvp
+         JOIN vaults v ON v.id = uvp.vault_id
+        ORDER BY uvp.id`,
+    ),
+  );
+
+  let released = false;
+  const cleanup = async (): Promise<void> => {
+    if (released) return;
+    released = true;
+    try {
+      await cursor.close();
+    } catch {
+      /* connection may already be gone */
+    }
+    client.release();
+  };
+
+  const stringifier = stringify({ header: true, columns: [...POSITIONS_EXPORT_COLUMNS] });
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="positions-export.csv"');
+  res.setHeader("Transfer-Encoding", "chunked");
+
+  stringifier.on("error", (err) => {
+    void cleanup();
+    res.destroy(err);
+  });
+  res.on("close", () => {
+    void cleanup();
+  });
+  stringifier.pipe(res);
+
+  try {
+    for (;;) {
+      const rows = await cursor.read(500);
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        if (!stringifier.write(row)) {
+          await once(stringifier, "drain");
+        }
+      }
+    }
+    stringifier.end();
+    await cleanup();
+  } catch (err) {
+    await cleanup();
+    if (!res.headersSent) {
+      next(err);
+      return;
+    }
+    res.destroy(err as Error);
   }
 }
 

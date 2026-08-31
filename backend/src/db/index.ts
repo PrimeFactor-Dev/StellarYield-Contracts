@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import { trace, SpanStatusCode, context } from "@opentelemetry/api";
 import { config } from "../config.js";
 import { logger } from "../logger.js";
-import { getCurrentRoute } from "../api/middleware/requestContext.js";
+import { getCurrentRoute, getCurrentMethod } from "../api/middleware/requestContext.js";
 import { AppError, ErrorCode } from "../api/middleware/errors.js";
 
 const tracer = trace.getTracer("stellaryield-db");
@@ -18,6 +18,35 @@ export const pool = new Pool({
   idleTimeoutMillis: config.db.idleTimeoutMs,
   query_timeout: config.db.queryTimeoutMs,
 });
+
+// Read-replica pool (#949). When DATABASE_READ_URL is set, read-only queries
+// issued from GET request handlers are routed here to keep write-heavy admin
+// and analytics traffic off the primary's connection pool. When it is unset,
+// `readPool` is the primary pool, so all queries hit the primary.
+export const readPool: pg.Pool = config.db.readUrl
+  ? new Pool({
+      connectionString: config.db.readUrl,
+      min: config.db.poolMin,
+      max: config.db.poolMax,
+      idleTimeoutMillis: config.db.idleTimeoutMs,
+      query_timeout: config.db.queryTimeoutMs,
+    })
+  : pool;
+
+const READ_ONLY_STATEMENT = /^\s*(?:select|show|explain)\b/i;
+
+/**
+ * Pick the pool for the current query: the read replica for read-only
+ * statements issued inside a GET request handler, the primary for everything
+ * else — writes (even those fired from a GET handler, such as the api_keys
+ * last-used stamp), background jobs, the indexer, and scripts. Falls back to
+ * the primary whenever no read replica is configured (`readPool === pool`).
+ */
+function poolForCurrentQuery(sql: string): pg.Pool {
+  if (readPool === pool) return pool;
+  if (getCurrentMethod() !== "GET") return pool;
+  return READ_ONLY_STATEMENT.test(sql) ? readPool : pool;
+}
 
 export function redactQueryParameters(sql: string): string {
   return sql
@@ -58,11 +87,12 @@ export async function query<T = Record<string, unknown>>(
   span.setAttribute("db.statement", sql.slice(0, 80));
 
   const start = performance.now();
+  const activePool = poolForCurrentQuery(sql);
   try {
     let result: pg.QueryResult;
     const timeoutMs = options?.timeoutMs;
     if (timeoutMs) {
-      const client = await pool.connect();
+      const client = await activePool.connect();
       try {
         await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
         result = await client.query(sql, params);
@@ -75,7 +105,7 @@ export async function query<T = Record<string, unknown>>(
         client.release();
       }
     } else {
-      result = await pool.query(sql, params);
+      result = await activePool.query(sql, params);
     }
 
     const durationMs = performance.now() - start;
@@ -115,9 +145,10 @@ export async function queryPrepared<T = Record<string, unknown>>(
   if (!stmt) {
     throw new Error(`Prepared statement "${name}" not registered`);
   }
+  const activePool = poolForCurrentQuery(stmt.text);
   const timeoutMs = options?.timeoutMs;
   if (timeoutMs) {
-    const client = await pool.connect();
+    const client = await activePool.connect();
     try {
       await client.query(`SET LOCAL statement_timeout = ${timeoutMs}`);
       const result = await client.query({ name: stmt.name, text: stmt.text, values: params });
@@ -131,7 +162,7 @@ export async function queryPrepared<T = Record<string, unknown>>(
       client.release();
     }
   }
-  const result = await pool.query({ name: stmt.name, text: stmt.text, values: params });
+  const result = await activePool.query({ name: stmt.name, text: stmt.text, values: params });
   return result.rows;
 }
 
@@ -157,9 +188,31 @@ async function validateConnection(): Promise<void> {
   }
 }
 
+/**
+ * Pre-warm the primary pool by opening POOL_WARMUP_CONNECTIONS connections
+ * upfront and returning them to the pool idle, so the first burst of traffic
+ * after startup never blocks on TCP + TLS + auth handshakes (#951). Called
+ * before the HTTP server starts accepting requests. A failure here is logged
+ * but never fatal — the pool will establish connections lazily instead.
+ */
+export async function warmUpPool(): Promise<void> {
+  const target = config.db.poolWarmupConnections;
+  if (target <= 0) return;
+  try {
+    const clients = await Promise.all(
+      Array.from({ length: target }, () => pool.connect()),
+    );
+    for (const client of clients) client.release();
+    logger.info(`Database pool warmed up with ${target} connections`);
+  } catch (err) {
+    logger.error({ err }, "Database pool warm-up failed; continuing startup");
+  }
+}
+
 process.on("SIGTERM", async () => {
   logger.info("Shutting down database pool");
   await pool.end();
+  if (readPool !== pool) await readPool.end();
 });
 
 // ── Pool exhaustion alerting (#828) ───────────────────────────────────────────

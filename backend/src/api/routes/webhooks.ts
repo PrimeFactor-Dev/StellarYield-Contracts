@@ -6,6 +6,8 @@ import {
   deleteWebhook,
   testWebhook,
   verifyWebhookSignature,
+  getGlobalOptOut,
+  setGlobalOptOut,
 } from "../controllers/webhooks.js";
 import { getWebhookStream } from "../controllers/webhooks-stream.js";
 import { requireApiKey } from "../middleware/auth.js";
@@ -15,7 +17,7 @@ import { KNOWN_EVENTS } from "../../services/notificationEvents.js";
 
 const KNOWN_CHANNELS = ["webhook", "email", "slack"] as const;
 
-const createWebhookSchema = z.object({
+export const createWebhookSchema = z.object({
   url: z.string().min(1, "URL or email is required"),
   events: z
     .array(z.enum(KNOWN_EVENTS))
@@ -34,10 +36,15 @@ const webhookParamsSchema = z.object({
 });
 
 /** Schema for POST /webhooks/verify-signature (#664) */
-const verifySignatureSchema = z.object({
+export const verifySignatureSchema = z.object({
   payload: z.string(),
   signature: z.string(),
   secret: z.string(),
+});
+
+/** Schema for PUT /webhooks/opt-out (#994) */
+const optOutSchema = z.object({
+  enabled: z.boolean(),
 });
 
 export const webhooksRouter = Router();
@@ -58,3 +65,7 @@ webhooksRouter.post(
 
 /** POST /admin/webhooks/:id/test — send test ping (#666) */
 webhooksRouter.post("/:id/test", validateParams(webhookParamsSchema), testWebhook);
+
+/** GET/PUT /webhooks/opt-out — global notification opt-out (#994) */
+webhooksRouter.get("/opt-out", getGlobalOptOut);
+webhooksRouter.put("/opt-out", validateBody(optOutSchema), setGlobalOptOut);

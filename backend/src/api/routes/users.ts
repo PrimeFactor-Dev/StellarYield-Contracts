@@ -46,7 +46,7 @@ const subscriptionParamsSchema = z.object({
   contractId: z.string().length(56).regex(/^C[A-Z2-7]{55}$/, "Invalid vault contract ID"),
 });
 
-const batchPortfoliosBodySchema = z.object({
+export const batchPortfoliosBodySchema = z.object({
   addresses: z
     .array(stellarAddressSchema)
     .min(1, "At least one address is required")
@@ -61,7 +61,7 @@ const kycQuerySchema = z.object({
   vaultId: z.string().length(56).regex(/^C[A-Z2-7]{55}$/),
 });
 
-const kycBatchBodySchema = z.object({
+export const kycBatchBodySchema = z.object({
   addresses: z
     .array(stellarAddressSchema)
     .min(1, "At least one address is required")

@@ -1,7 +1,8 @@
 import "dotenv/config";
 import { z } from "zod";
+import cron from "node-cron";
 
-const envSchema = z.object({
+export const envSchema = z.object({
   PORT: z
     .string()
     .transform((v) => parseInt(v, 10))
@@ -36,6 +37,14 @@ const envSchema = z.object({
     .string()
     .refine((v) => /^postgres(ql)?:\/\/.+/.test(v), {
       message: "DATABASE_URL must be a valid PostgreSQL connection string (postgresql://...)",
+    }),
+  // Optional read replica. SELECT-only (GET handler) queries are routed here to
+  // offload the primary. Falls back to DATABASE_URL when unset (#949).
+  DATABASE_READ_URL: z
+    .string()
+    .optional()
+    .refine((v) => v === undefined || /^postgres(ql)?:\/\/.+/.test(v), {
+      message: "DATABASE_READ_URL must be a valid PostgreSQL connection string (postgresql://...)",
     }),
   INDEXER_START_LEDGER: z
     .string()
@@ -106,6 +115,13 @@ const envSchema = z.object({
     .default("500")
     .transform((v) => parseInt(v, 10))
     .pipe(z.number().int().min(1)),
+  // Connections to establish upfront once the pool is validated, so cold-start
+  // requests never wait on connection setup under load (#951).
+  POOL_WARMUP_CONNECTIONS: z
+    .string()
+    .default("3")
+    .transform((v) => parseInt(v, 10))
+    .pipe(z.number().int().min(0)),
   SLOW_QUERY_THRESHOLD_MS: z
     .string()
     .optional()
@@ -121,6 +137,12 @@ const envSchema = z.object({
     .default("90")
     .transform((v) => parseInt(v, 10))
     .pipe(z.number().int().min(1)),
+  ARCHIVE_CRON: z
+    .string()
+    .default("0 2 * * *")
+    .refine((v) => cron.validate(v), {
+      message: "ARCHIVE_CRON must be a valid cron expression",
+    }),
   ADMIN_IP_ALLOWLIST: z
     .string()
     .default(""),
@@ -130,6 +152,22 @@ const envSchema = z.object({
   INTERNAL_SECRET: z
     .string()
     .default(""),
+  ADMIN_JWT_SECRET: z
+    .string()
+    .default("change-me-in-production"),
+  ADMIN_SESSION_EXPIRY_MINUTES: z
+    .string()
+    .default("60")
+    .transform((v) => parseInt(v, 10))
+    .pipe(z.number().int().min(1)),
+  SANDBOX_MODE: z
+    .string()
+    .default("false")
+    .transform((v) => ["true", "1", "yes"].includes(v.toLowerCase())),
+  ENABLE_SANDBOX_RESET: z
+    .string()
+    .default("false")
+    .transform((v) => ["true", "1", "yes"].includes(v.toLowerCase())),
   CORS_MAX_AGE: z
     .string()
     .default("600")
@@ -140,6 +178,11 @@ const envSchema = z.object({
     .default("15000")
     .transform((v) => parseInt(v, 10))
     .pipe(z.number().int().min(1)),
+  KEY_INACTIVITY_DAYS: z
+    .string()
+    .optional()
+    .transform((v) => (v ? parseInt(v, 10) : null))
+    .pipe(z.number().int().min(1).nullable().default(null)),
   YIELD_CLAIM_EXPIRY_DAYS: z
     .string()
     .optional()
@@ -198,6 +241,22 @@ export const config = {
   port: parsed.data.PORT,
   nodeEnv: parsed.data.NODE_ENV,
 
+  get adminJwtSecret() {
+    return process.env.ADMIN_JWT_SECRET ?? parsed.data.ADMIN_JWT_SECRET;
+  },
+  get adminSessionExpiryMinutes() {
+    return Number(process.env.ADMIN_SESSION_EXPIRY_MINUTES ?? parsed.data.ADMIN_SESSION_EXPIRY_MINUTES);
+  },
+  get sandboxMode() {
+    return (process.env.SANDBOX_MODE ?? String(parsed.data.SANDBOX_MODE)).toLowerCase() === "true" || process.env.SANDBOX_MODE === "1";
+  },
+  get enableSandboxReset() {
+    return (process.env.ENABLE_SANDBOX_RESET ?? String(parsed.data.ENABLE_SANDBOX_RESET)).toLowerCase() === "true" || process.env.ENABLE_SANDBOX_RESET === "1";
+  },
+  get archiveCron(): string {
+    return process.env.ARCHIVE_CRON ?? parsed.data.ARCHIVE_CRON;
+  },
+
   stellar: {
     network: parsed.data.STELLAR_NETWORK,
     rpcUrl: parsed.data.STELLAR_RPC_URL,
@@ -212,11 +271,13 @@ export const config = {
 
   db: {
     url: parsed.data.DATABASE_URL,
+    readUrl: parsed.data.DATABASE_READ_URL ?? null,
     poolMin: parsed.data.DB_POOL_MIN,
     poolMax: parsed.data.DB_POOL_MAX,
     idleTimeoutMs: parsed.data.DB_IDLE_TIMEOUT_MS,
     queryTimeoutMs: parsed.data.DB_QUERY_TIMEOUT_MS,
     slowQueryMs: parsed.data.SLOW_QUERY_THRESHOLD_MS ?? parsed.data.DB_SLOW_QUERY_MS,
+    poolWarmupConnections: parsed.data.POOL_WARMUP_CONNECTIONS,
   },
   maxResponseSizeMb: parsed.data.MAX_RESPONSE_SIZE_MB,
 
@@ -257,6 +318,9 @@ export const config = {
   },
   sseHeartbeatMs: parsed.data.SSE_HEARTBEAT_MS,
   yieldClaimExpiryDays: parsed.data.YIELD_CLAIM_EXPIRY_DAYS,
+  // Days of inactivity after which an API key is deactivated; null disables
+  // the sweep entirely (#934).
+  apiKeyInactivityDays: parsed.data.KEY_INACTIVITY_DAYS,
   otelEndpoint: parsed.data.OTEL_EXPORTER_OTLP_ENDPOINT,
   sseReplayBufferSize: parsed.data.SSE_REPLAY_BUFFER,
   dbPoolAlertWaiting: parsed.data.DB_POOL_ALERT_WAITING,
