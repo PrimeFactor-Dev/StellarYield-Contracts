@@ -6,6 +6,8 @@ import {
   deleteWebhook,
   testWebhook,
   verifyWebhookSignature,
+  getGlobalOptOut,
+  setGlobalOptOut,
 } from "../controllers/webhooks.js";
 import { getWebhookStream } from "../controllers/webhooks-stream.js";
 import { requireApiKey } from "../middleware/auth.js";
@@ -40,6 +42,11 @@ export const verifySignatureSchema = z.object({
   secret: z.string(),
 });
 
+/** Schema for PUT /webhooks/opt-out (#994) */
+const optOutSchema = z.object({
+  enabled: z.boolean(),
+});
+
 export const webhooksRouter = Router();
 
 webhooksRouter.use(requireApiKey());
@@ -58,3 +65,7 @@ webhooksRouter.post(
 
 /** POST /admin/webhooks/:id/test — send test ping (#666) */
 webhooksRouter.post("/:id/test", validateParams(webhookParamsSchema), testWebhook);
+
+/** GET/PUT /webhooks/opt-out — global notification opt-out (#994) */
+webhooksRouter.get("/opt-out", getGlobalOptOut);
+webhooksRouter.put("/opt-out", validateBody(optOutSchema), setGlobalOptOut);
