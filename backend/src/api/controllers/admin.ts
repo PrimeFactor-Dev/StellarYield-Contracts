@@ -190,13 +190,17 @@ export async function getAdminStats(_req: Request, res: Response, next: NextFunc
     const userCountRows = await query<{ count: string }>("SELECT COUNT(*)::text as count FROM users");
     const totalAssetsRows = await query<{ total: string }>("SELECT COALESCE(SUM(total_assets::numeric), 0)::text as total FROM vaults");
     const epochCountRows = await query<{ count: string }>("SELECT COUNT(*)::text as count FROM epochs");
+    const archiveSizeRows = await query<{ total: string }>(
+      "SELECT COALESCE(SUM(pg_total_relation_size(relid)), 0)::text AS total FROM pg_stat_user_tables WHERE relname LIKE '%_archive'",
+    );
 
     const vaultCount = parseInt(vaultCountRows[0]?.count ?? "0", 10);
     const userCount = parseInt(userCountRows[0]?.count ?? "0", 10);
     const totalValueLocked = totalAssetsRows[0]?.total ?? "0";
     const epochCount = parseInt(epochCountRows[0]?.count ?? "0", 10);
+    const archiveSizeBytes = parseInt(archiveSizeRows[0]?.total ?? "0", 10);
 
-    res.json({ vaultCount, userCount, totalValueLocked, epochCount });
+    res.json({ vaultCount, userCount, totalValueLocked, epochCount, archiveSizeBytes });
   } catch (err) {
     next(err);
   }

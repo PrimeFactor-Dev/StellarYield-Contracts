@@ -97,6 +97,7 @@ const adminStatsSchema = z.object({
   userCount: z.number(),
   totalValueLocked: z.string(),
   epochCount: z.number(),
+  archiveSizeBytes: z.number(),
 });
 
 const indexerStatusSchema = z.object({

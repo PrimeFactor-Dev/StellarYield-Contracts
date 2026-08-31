@@ -194,7 +194,7 @@ describe("Admin Controller", () => {
 
   // ── Unit tests (controller function directly) ─────────────────────────────
   describe("getAdminStats", () => {
-    it("returns vault/user/epoch counts and TVL", async () => {
+    it("returns vault/user/epoch counts, TVL, and archiveSizeBytes", async () => {
       const { query, getAdminStats } = await getTestContext();
       // vaultCount
       query.mockResolvedValueOnce([{ count: "2" }]);
@@ -204,6 +204,8 @@ describe("Admin Controller", () => {
       query.mockResolvedValueOnce([{ total: "12345" }]);
       // epochCount
       query.mockResolvedValueOnce([{ count: "3" }]);
+      // archiveSizeBytes
+      query.mockResolvedValueOnce([{ total: "1048576" }]);
 
       const req = {} as any;
       const res = { json: vi.fn() } as any;
@@ -211,7 +213,75 @@ describe("Admin Controller", () => {
 
       await getAdminStats(req, res, next);
 
-      expect(res.json).toHaveBeenCalledWith({ vaultCount: 2, userCount: 42, totalValueLocked: "12345", epochCount: 3 });
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining("pg_total_relation_size(relid)"),
+      );
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining("LIKE '%_archive'"),
+      );
+      expect(res.json).toHaveBeenCalledWith({
+        vaultCount: 2,
+        userCount: 42,
+        totalValueLocked: "12345",
+        epochCount: 3,
+        archiveSizeBytes: 1048576,
+      });
+    });
+
+    it("returns archiveSizeBytes as 0 if no archive tables exist yet", async () => {
+      const { query, getAdminStats } = await getTestContext();
+      // vaultCount
+      query.mockResolvedValueOnce([{ count: "1" }]);
+      // userCount
+      query.mockResolvedValueOnce([{ count: "5" }]);
+      // totalValueLocked
+      query.mockResolvedValueOnce([{ total: "0" }]);
+      // epochCount
+      query.mockResolvedValueOnce([{ count: "0" }]);
+      // archiveSize with 0 total
+      query.mockResolvedValueOnce([{ total: "0" }]);
+
+      const req = {} as any;
+      const res = { json: vi.fn() } as any;
+      const next = vi.fn();
+
+      await getAdminStats(req, res, next);
+
+      expect(res.json).toHaveBeenCalledWith({
+        vaultCount: 1,
+        userCount: 5,
+        totalValueLocked: "0",
+        epochCount: 0,
+        archiveSizeBytes: 0,
+      });
+    });
+
+    it("returns archiveSizeBytes as 0 if query returns empty array", async () => {
+      const { query, getAdminStats } = await getTestContext();
+      // vaultCount
+      query.mockResolvedValueOnce([{ count: "0" }]);
+      // userCount
+      query.mockResolvedValueOnce([{ count: "0" }]);
+      // totalValueLocked
+      query.mockResolvedValueOnce([{ total: "0" }]);
+      // epochCount
+      query.mockResolvedValueOnce([{ count: "0" }]);
+      // archiveSize empty array
+      query.mockResolvedValueOnce([]);
+
+      const req = {} as any;
+      const res = { json: vi.fn() } as any;
+      const next = vi.fn();
+
+      await getAdminStats(req, res, next);
+
+      expect(res.json).toHaveBeenCalledWith({
+        vaultCount: 0,
+        userCount: 0,
+        totalValueLocked: "0",
+        epochCount: 0,
+        archiveSizeBytes: 0,
+      });
     });
   });
 
@@ -357,7 +427,7 @@ describe("Admin Controller", () => {
       expect(res.body).toMatchObject({ error: "Forbidden" });
     });
 
-    it("returns 200 with correct vaultCount and userCount for a valid admin key and seeded DB", async () => {
+    it("returns 200 with correct vaultCount, userCount, and archiveSizeBytes for a valid admin key and seeded DB", async () => {
       const { query } = await import("../../db/index.js");
       const mockQuery = query as ReturnType<typeof vi.fn>;
 
@@ -373,6 +443,8 @@ describe("Admin Controller", () => {
       mockQuery.mockResolvedValueOnce([{ total: "9999999" }]);
       // getAdminStats: epochCount
       mockQuery.mockResolvedValueOnce([{ count: "5" }]);
+      // getAdminStats: archiveSizeBytes
+      mockQuery.mockResolvedValueOnce([{ total: "204800" }]);
 
       const app = await getApp();
       const res = await supertest(app)
@@ -385,6 +457,7 @@ describe("Admin Controller", () => {
         userCount: 7,
         totalValueLocked: "9999999",
         epochCount: 5,
+        archiveSizeBytes: 204800,
       });
     });
   });
